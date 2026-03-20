@@ -72,6 +72,12 @@ typings/
 .env
 .env.test
 
+# OAuth credentials - NEVER commit these
+credentials.json
+client.json
+token.json
+services/google/token.json
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 

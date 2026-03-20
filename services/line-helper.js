@@ -1,14 +1,17 @@
-let model = {};
-const LineBot = require("./linebot/line_init");
+const LineBot = require('./linebot/line_init');
 
-/**
- * 
- * @param {string} lineIDs - 推播訊息
- * @param {object} data - 
- */
+const model = {};
 
-model.notify = async function (ID, title) {
-  await LineBot.pushText(ID, `Robot提醒 今晚有研討會喔！`);
-}
+model.notify = async function (userId, message) {
+  if (!userId) throw new Error('LINE user ID is required');
+  if (!message) throw new Error('Notification message is required');
+
+  try {
+    await LineBot.pushText(userId, message);
+  } catch (error) {
+    console.error('Failed to send LINE notification:', error.message);
+    throw error;
+  }
+};
 
 module.exports = model;
