@@ -1,69 +1,100 @@
-require('dotenv').config();
+const crypto = require('crypto');
 const express = require('express');
 const cron = require('node-cron');
-const lineHelper = require("./services/line-helper");
-let app = express();
-let moment = require("moment-timezone");
-const bodyParser = require('body-parser');
-const sheetHelper = require("./services/google/google-sheet-helper");
-const DATA_RANGE = "第34組!A4:B100";
+const moment = require('moment-timezone');
+const config = require('./config');
+const lineHelper = require('./services/line-helper');
+const Sheet = require('./services/google/google-sheet-helper');
 
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+const app = express();
+
+app.use(express.json({
+  verify: (req, res, buf) => { req.rawBody = buf; },
+}));
+app.use(express.urlencoded({ extended: true }));
+
+const sheetClient = new Sheet(config.google.sheetId);
+let authorized = false;
 
 async function readFromGoogleSheet(dataRange) {
-  let s = new sheetHelper("1gEr2nDrfwPIj25DSDgYGEmly-V89im18Kq70hWXe6u4");
-  await s.getAuthorize();
-  let l = await s.ReadDataFrom(dataRange);
-  let r = l.map((a) => { return new Date(`${a[1].split('/')[0]}-${a[1].split('/')[1]}-${a[1].split('/')[2]}`); });
-  let t = l.map((a) => { return a[0]; });
+  if (!authorized) {
+    await sheetClient.getAuthorize();
+    authorized = true;
+  }
 
-  return {
-      titleList: t,
-      dateList: r
-  };
+  const rows = await sheetClient.readData(dataRange);
+  const dates = rows.map((row) => {
+    const parts = row[1] ? row[1].split('/') : [];
+    if (parts.length < 3) return null;
+    return new Date(parts[0], parts[1] - 1, parts[2]);
+  }).filter(Boolean);
+
+  const titles = rows.map((row) => row[0]);
+
+  return { titleList: titles, dateList: dates };
 }
 
-/* 
- * 讀書會 schedule events 
+function getUpcomingDates(dateList) {
+  const now = moment().tz(config.timezone).format('YYYYMMDD');
+  return dateList.filter((d) => moment(d).isAfter(now));
+}
+
+/*
+ * 讀書會 schedule events
  */
-// 0 10 * * * => PM 6:00 at Taipei/Asia
-cron.schedule('0 10 * * *', async () => {
-  console.log("notify at PM 6:00 in Taiwan");
+cron.schedule(config.cron.schedule, async () => {
+  console.log('Running scheduled notification check');
   try {
-    let scheduleDates = await readFromGoogleSheet(DATA_RANGE)
+    const result = await readFromGoogleSheet(config.google.sheetRange);
+    const upcoming = getUpcomingDates(result.dateList);
 
-    let now = moment().tz("Asia/Taipei").format("YYYYMMDD");
-    scheduleDates = scheduleDates.dateList.filter((a) => { return moment(a).isAfter(now) });
-
-    if (scheduleDates !== "") {
-        lineHelper.notify("Cf4f166dac19ea479efdfcad6d1089843");
+    if (upcoming.length > 0) {
+      await lineHelper.notify(config.line.notifyUserId, config.notification.message);
     }
-
-  } catch (e) {
-    console.log(e);
+  } catch (error) {
+    console.error('Cron job error:', error);
   }
 });
 
 app.get('/', async function (req, res) {
-  let now = moment().tz("Asia/Taipei").format("YYYYMMDD");
-  let ret = await readFromGoogleSheet(DATA_RANGE)
-  scheduleDates = ret.dateList.filter((a) => { return moment(a).isAfter(now) });
-
-  res.json(scheduleDates)
+  try {
+    const result = await readFromGoogleSheet(config.google.sheetRange);
+    const upcoming = getUpcomingDates(result.dateList);
+    res.json(upcoming);
+  } catch (error) {
+    console.error('Error reading schedule:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-const handleEvent = event => {
-    console.log('live')
-  };
-  
-app.post('/webhook', (req, res) => {
-    const { body } = req;
-    const { events } = body;
-  
-    Promise.all(events.map(handleEvent))
-      .then(result => res.status(200).send(result))
-      .catch(err => console.log(err));
-  });
+function verifyLineSignature(req, res, next) {
+  const channelSecret = config.line.channelSecret;
+  const signature = req.headers['x-line-signature'];
+
+  if (!signature) {
+    return res.status(401).json({ error: 'Missing signature' });
+  }
+
+  const expected = crypto
+    .createHmac('SHA256', channelSecret)
+    .update(req.rawBody)
+    .digest('base64');
+
+  if (signature !== expected) {
+    return res.status(403).json({ error: 'Invalid signature' });
+  }
+
+  next();
+}
+
+app.post('/webhook', verifyLineSignature, (req, res) => {
+  const events = req.body && req.body.events;
+
+  if (!Array.isArray(events)) {
+    return res.status(400).json({ error: 'Invalid request body' });
+  }
+
+  res.status(200).json({ message: 'OK' });
+});
 
 module.exports = app;
